@@ -1,0 +1,247 @@
+🔬 LABs Wireshark - Simulations Détaillées avec Explications
+Je vais reprendre chaque LAB avec des explications approfondies pour chaque étape.
+
+🎯 LAB 1 : Détection de Scan de Ports (Reconnaissance)
+📖 Contexte théorique
+Qu'est-ce qu'un scan de ports ?
+
+C'est la première phase d'une attaque : la reconnaissance
+L'attaquant cherche à identifier quels services sont actifs sur la cible
+C'est comme "frapper à toutes les portes" pour voir lesquelles s'ouvrent
+
+Pourquoi c'est dangereux ?
+
+Révèle les services vulnérables
+Précède souvent une exploitation
+Indicateur d'une future attaque ciblée
+
+🎬 Scénario réaliste
+Alerte SIEM à 14h23 : "Activité de scan potentielle détectée depuis 192.168.1.50 vers srv-web-prod (192.168.1.100)"
+Vous êtes l'analyste SOC de garde. Vous devez :
+
+Confirmer qu'il s'agit bien d'un scan
+Identifier le type de scan utilisé
+Déterminer si l'attaquant a découvert des services ouverts
+Documenter pour blocage firewall
+
+🔍 Investigation pas-à-pas
+Étape 1 : Ouvrir la capture et appliquer le premier filtre
+ip.src == 192.168.1.50 && tcp.flags.syn == 1
+💡 Explication du filtre :
+
+ip.src == 192.168.1.50 : On se concentre sur l'IP suspecte mentionnée dans l'alerte
+tcp.flags.syn == 1 : Le flag SYN est utilisé pour initier une connexion TCP
+Si on voit beaucoup de SYN sans connexions établies → SCAN
+
+📊 Ce que vous devriez voir :
+No.   Time        Source         Destination    Protocol  Info
+1234  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54321 → 21 [SYN]
+1235  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54322 → 22 [SYN]
+1236  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54323 → 23 [SYN]
+1237  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54324 → 80 [SYN]
+... (des centaines/milliers de lignes similaires)
+🚨 Pourquoi c'est suspect ?
+
+Même source, même destination, ports différents
+Fréquence très élevée (plusieurs paquets par milliseconde)
+Aucun humain ne fait ça manuellement → C'est automatisé
+
+
+Étape 2 : Analyser les statistiques de conversation
+Menu : Statistics → Conversations → Onglet TCP
+💡 Ce menu fait quoi ?
+
+Liste toutes les "conversations" TCP dans la capture
+Une conversation = échange entre 2 IPs sur un port spécifique
+Permet de voir rapidement les patterns anormaux
+
+📊 Résultat typique d'un scan :
+Address A         Port A  <->  Address B         Port B  Packets  Bytes
+192.168.1.50      54321        192.168.1.100     21      2        120
+192.168.1.50      54322        192.168.1.100     22      4        240    ← Port ouvert (SYN-ACK reçu)
+192.168.1.50      54323        192.168.1.100     23      2        120
+192.168.1.50      54324        192.168.1.100     80      4        240    ← Port ouvert
+192.168.1.50      54325        192.168.1.100     443     4        240    ← Port ouvert
+... (1000 lignes)
+🔎 Analyse :
+
+2 paquets : SYN envoyé, mais pas de réponse (port fermé ou filtré)
+4 paquets : SYN envoyé + SYN-ACK reçu + ACK envoyé + RST envoyé = PORT OUVERT
+
+💡 Pourquoi 4 paquets pour un port ouvert ?
+1. Attaquant → Cible : SYN (Je veux me connecter)
+2. Cible → Attaquant : SYN-ACK (OK, connectons-nous)
+3. Attaquant → Cible : ACK (Connexion confirmée)
+4. Attaquant → Cible : RST (En fait, je ferme immédiatement - typique d'un scan)
+
+Étape 3 : Identifier le type de scan
+💡 Pourquoi c'est important ?
+Différents scans = différentes techniques = différents niveaux de sophistication
+A) SYN Scan (Stealth Scan) - LE PLUS COURANT
+Filtre : tcp.flags.syn==1 && tcp.flags.ack==0
+📊 Pattern dans Wireshark :
+→ SYN
+← SYN-ACK (si port ouvert) ou RST (si fermé)
+→ RST (attaquant ferme sans finaliser)
+💡 Pourquoi "stealth" ?
+
+Ne complète JAMAIS le handshake TCP complet (3-way handshake)
+Certains vieux systèmes de logs ne l'enregistrent pas
+Plus discret qu'un scan complet
+
+🔍 Dans Wireshark, vous verrez :
+
+Beaucoup de paquets avec flag [SYN]
+Quelques réponses [SYN, ACK] (ports ouverts)
+Suivies immédiatement de [RST] de l'attaquant
+
+
+B) FIN Scan (Scan furtif avancé)
+Filtre : tcp.flags.fin==1 && tcp.flags.syn==0 && tcp.flags.ack==0
+💡 Principe :
+
+Envoie un paquet FIN (normalement utilisé pour fermer une connexion)
+Si port fermé : la cible répond RST
+Si port ouvert : la cible ne répond PAS (selon RFC 793)
+
+🎯 Objectif de l'attaquant :
+
+Bypasser les firewalls basiques qui bloquent les SYN
+Plus discret que SYN scan
+
+📊 Dans Wireshark :
+→ [FIN]
+← [RST] (port fermé)
+← (silence) (port ouvert - déduit par absence de réponse)
+
+C) XMAS Scan (Scan "sapin de Noël")
+Filtre : tcp.flags.fin==1 && tcp.flags.push==1 && tcp.flags.urg==1
+💡 Pourquoi ce nom bizarre ?
+
+Active 3 flags en même temps : FIN, PSH, URG
+Dans Wireshark, ça "illumine" le paquet comme un sapin de Noël
+Configuration anormale et illogique en usage normal
+
+🎯 Technique :
+
+Même logique que FIN scan
+Encore plus furtif (certains IDS ne le détectent pas)
+
+📊 Pattern Wireshark :
+No.   Flags                    Info
+1     [FIN, PSH, URG]         → Envoi du scan
+2     [RST]                   ← Port fermé
+3     [FIN, PSH, URG]         → Envoi du scan
+      (pas de réponse)        ← Port ouvert (silence)
+
+Étape 4 : Créer une timeline de l'attaque
+Menu : Statistics → IO Graph
+Configuration du graphique :
+
+Y-Axis : COUNT
+Filter : tcp.flags.syn==1 && ip.src==192.168.1.50
+Interval : 1 second
+
+📊 Graphique résultant :
+Paquets/sec
+    |
+600 |     ████████
+    |    █████████████
+400 |   ████████████████
+    |  ███████████████████
+200 | ████████████████████
+    |█████████████████████
+  0 |________________________
+     14:23:00    14:23:30    14:24:00
+💡 Interprétation :
+
+Pic soudain : L'attaque commence
+Plateau élevé : Scan en cours (centaines de paquets/seconde)
+Chute brusque : Fin du scan
+Durée : ~45 secondes (scan rapide, outil automatisé type Nmap)
+
+🚨 Comparaison avec trafic normal :
+
+Navigation web normale : 5-50 paquets/seconde
+Scan de ports : 200-1000+ paquets/seconde
+
+
+Étape 5 : Identifier les ports ouverts découverts
+Filtre : ip.src==192.168.1.100 && tcp.flags.syn==1 && tcp.flags.ack==1
+💡 Ce filtre montre quoi ?
+
+ip.src==192.168.1.100 : Réponses de la CIBLE
+tcp.flags.syn==1 && tcp.flags.ack==1 : Flag SYN-ACK = "Oui, ce port est ouvert"
+
+📊 Résultat :
+No.   Source         Destination    Info
+1456  192.168.1.100  192.168.1.50   22 → 54322 [SYN, ACK]  ← SSH ouvert
+1789  192.168.1.100  192.168.1.50   80 → 54380 [SYN, ACK]  ← HTTP ouvert
+2034  192.168.1.100  192.168.1.50   443 → 54443 [SYN, ACK] ← HTTPS ouvert
+2567  192.168.1.100  192.168.1.50   3306 → 54521 [SYN, ACK] ← MySQL ouvert ⚠️
+🚨 ALERTE CRITIQUE :
+
+Port 3306 (MySQL) ouvert sur un serveur web
+Ne devrait PAS être accessible depuis le réseau
+Risque d'exploitation de base de données
+
+
+📋 Rapport d'incident à produire
+╔══════════════════════════════════════════════════════════════╗
+║             RAPPORT D'INCIDENT - SCAN DE PORTS               ║
+╠══════════════════════════════════════════════════════════════╣
+║ ID Incident    : SOC-2024-0342                               ║
+║ Date/Heure     : 2024-05-20 14:23:01 UTC                     ║
+║ Analyste       : [Votre nom]                                 ║
+║ Sévérité       : MOYENNE → ÉLEVÉE                            ║
+╠══════════════════════════════════════════════════════════════╣
+║ INDICATEURS DE COMPROMISSION (IOCs)                          ║
+╠══════════════════════════════════════════════════════════════╣
+║ IP Attaquante  : 192.168.1.50                                ║
+║ IP Victime     : 192.168.1.100 (srv-web-prod)                ║
+║ Type d'attaque : SYN Scan (Nmap probable)                    ║
+║ Durée          : 45 secondes                                 ║
+║ Ports scannés  : 1-65535 (scan complet)                      ║
+╠══════════════════════════════════════════════════════════════╣
+║ PORTS OUVERTS DÉCOUVERTS PAR L'ATTAQUANT                     ║
+╠══════════════════════════════════════════════════════════════╣
+║ • 22/tcp   (SSH)     - Légitime, accès admin                 ║
+║ • 80/tcp   (HTTP)    - Légitime, serveur web                 ║
+║ • 443/tcp  (HTTPS)   - Légitime, serveur web                 ║
+║ • 3306/tcp (MySQL)   - ⚠️ NE DEVRAIT PAS ÊTRE EXPOSÉ         ║
+╠══════════════════════════════════════════════════════════════╣
+║ ANALYSE                                                       ║
+╠══════════════════════════════════════════════════════════════╣
+║ Phase d'attaque : RECONNAISSANCE (Cyber Kill Chain)          ║
+║                                                               ║
+║ L'attaquant a utilisé un scan SYN (stealth) pour identifier  ║
+║ les services actifs. La découverte du port MySQL ouvert      ║
+║ représente une vulnérabilité critique.                       ║
+║                                                               ║
+║ RISQUES :                                                     ║
+║ 1. Tentative de brute force SSH imminente                    ║
+║ 2. Exploitation potentielle de MySQL (injection, brute force)║
+║ 3. Scan = préparation d'attaque plus sophistiquée            ║
+╠══════════════════════════════════════════════════════════════╣
+║ ACTIONS RECOMMANDÉES (PRIORITÉ)                              ║
+╠══════════════════════════════════════════════════════════════╣
+║ ✅ IMMÉDIAT (0-1h)                                            ║
+║   • Bloquer 192.168.1.50 sur le firewall                     ║
+║   • Vérifier si 192.168.1.50 est une IP interne légitime    ║
+║   • Activer monitoring renforcé sur srv-web-prod             ║
+║                                                               ║
+║ ⚠️ COURT TERME (1-24h)                                        ║
+║   • Fermer port 3306 ou restreindre à IPs admin uniquement  ║
+║   • Renforcer authentification SSH (clés, 2FA)               ║
+║   • Analyser logs serveur pour tentatives post-scan          ║
+║                                                               ║
+║ 🔧 MOYEN TERME (1-7 jours)                                    ║
+║   • Audit complet de la segmentation réseau                  ║
+║   • Déploiement IPS pour blocage automatique des scans       ║
+╠══════════════════════════════════════════════════════════════╣
+║ PREUVES JOINTES                                               ║
+╠══════════════════════════════════════════════════════════════╣
+║ • scan_192.168.1.50.pcap (fichier Wireshark)                 ║
+║ • timeline_io_graph.png (graphique de l'attaque)             ║
+║ • open_ports_list.txt (liste des ports découverts)           ║
+╚══════════════════════════════════════════════════════════════╝
