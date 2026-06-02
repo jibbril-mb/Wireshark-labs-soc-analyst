@@ -19,146 +19,48 @@ Indicateur d'une future attaque ciblée
 Alerte SIEM à 14h23 : "Activité de scan potentielle détectée depuis 192.168.1.50 vers srv-web-prod (192.168.1.100)"
 Vous êtes l'analyste SOC de garde. Vous devez :
 
-Confirmer qu'il s'agit bien d'un scan
-Identifier le type de scan utilisé
-Déterminer si l'attaquant a découvert des services ouverts
-Documenter pour blocage firewall
+***Confirmer qu'il s'agit bien d'un scan**
+	- Identifier le type de scan utilisé
+	- Déterminer si l'attaquant a découvert des services ouverts
+	- Documenter pour blocag
 
-🔍 Investigation pas-à-pas
+
+# Confirmer qu'il s'agit bien d'un scan
+
+🔍 Investigation 
+
 Étape 1 : Ouvrir la capture et appliquer le premier filtre
-ip.src == 192.168.1.50 && tcp.flags.syn == 1
-💡 Explication du filtre :
+
+**Filtre :     ip.src == 192.168.1.50 && tcp.flags.syn == 1**
+					or
+**Filtre : tcp.flags.syn == 1 and tcp.flags.ack == 0**  // Cela exclut les SYN+ACK (car ils ont ACK=1) et ne garde que les SYN initiaux.
 
 ip.src == 192.168.1.50 : On se concentre sur l'IP suspecte mentionnée dans l'alerte
 tcp.flags.syn == 1 : Le flag SYN est utilisé pour initier une connexion TCP
-Si on voit beaucoup de SYN sans connexions établies → SCAN
 
-📊 Ce que vous devriez voir :
+
+............ Ce que nous avons dans les output .......
+
 No.   Time        Source         Destination    Protocol  Info
+--------------------------------------------------------------------------
 1234  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54321 → 21 [SYN]
 1235  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54322 → 22 [SYN]
 1236  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54323 → 23 [SYN]
 1237  14:23:01.1  192.168.1.50   192.168.1.100  TCP       54324 → 80 [SYN]
 ... (des centaines/milliers de lignes similaires)
-🚨 Pourquoi c'est suspect ?
 
-Même source, même destination, ports différents
-Fréquence très élevée (plusieurs paquets par milliseconde)
-Aucun humain ne fait ça manuellement → C'est automatisé
+	On voit beaucoup de SYN sans connexions établies, donc → SCAN
 
 
-Étape 2 : Analyser les statistiques de conversation
-Menu : Statistics → Conversations → Onglet TCP
-💡 Ce menu fait quoi ?
-
-Liste toutes les "conversations" TCP dans la capture
-Une conversation = échange entre 2 IPs sur un port spécifique
-Permet de voir rapidement les patterns anormaux
-
-📊 Résultat typique d'un scan :
-Address A         Port A  <->  Address B         Port B  Packets  Bytes
-192.168.1.50      54321        192.168.1.100     21      2        120
-192.168.1.50      54322        192.168.1.100     22      4        240    ← Port ouvert (SYN-ACK reçu)
-192.168.1.50      54323        192.168.1.100     23      2        120
-192.168.1.50      54324        192.168.1.100     80      4        240    ← Port ouvert
-192.168.1.50      54325        192.168.1.100     443     4        240    ← Port ouvert
-... (1000 lignes)
-🔎 Analyse :
-
-2 paquets : SYN envoyé, mais pas de réponse (port fermé ou filtré)
-4 paquets : SYN envoyé + SYN-ACK reçu + ACK envoyé + RST envoyé = PORT OUVERT
-
-💡 Pourquoi 4 paquets pour un port ouvert ?
-1. Attaquant → Cible : SYN (Je veux me connecter)
-2. Cible → Attaquant : SYN-ACK (OK, connectons-nous)
-3. Attaquant → Cible : ACK (Connexion confirmée)
-4. Attaquant → Cible : RST (En fait, je ferme immédiatement - typique d'un scan)
-
-Étape 3 : Identifier le type de scan
-💡 Pourquoi c'est important ?
-Différents scans = différentes techniques = différents niveaux de sophistication
-A) SYN Scan (Stealth Scan) - LE PLUS COURANT
-Filtre : tcp.flags.syn==1 && tcp.flags.ack==0
-📊 Pattern dans Wireshark :
-→ SYN
-← SYN-ACK (si port ouvert) ou RST (si fermé)
-→ RST (attaquant ferme sans finaliser)
-💡 Pourquoi "stealth" ?
-
-Ne complète JAMAIS le handshake TCP complet (3-way handshake)
-Certains vieux systèmes de logs ne l'enregistrent pas
-Plus discret qu'un scan complet
-
-🔍 Dans Wireshark, vous verrez :
-
-Beaucoup de paquets avec flag [SYN]
-Quelques réponses [SYN, ACK] (ports ouverts)
-Suivies immédiatement de [RST] de l'attaquant
+	Pourquoi c'est suspect ?
+- Même source, même destination, ports différents
+- Fréquence très élevée (plusieurs paquets par milliseconde)
+- Aucun humain ne fait ça manuellement → C'est automatisé
 
 
-B) FIN Scan (Scan furtif avancé)
-Filtre : tcp.flags.fin==1 && tcp.flags.syn==0 && tcp.flags.ack==0
-💡 Principe :
+	→ Première phase d'une attaque : la reconnaissance
 
-Envoie un paquet FIN (normalement utilisé pour fermer une connexion)
-Si port fermé : la cible répond RST
-Si port ouvert : la cible ne répond PAS (selon RFC 793)
 
-🎯 Objectif de l'attaquant :
-
-Bypasser les firewalls basiques qui bloquent les SYN
-Plus discret que SYN scan
-
-📊 Dans Wireshark :
-→ [FIN]
-← [RST] (port fermé)
-← (silence) (port ouvert - déduit par absence de réponse)
-
-C) XMAS Scan (Scan "sapin de Noël")
-Filtre : tcp.flags.fin==1 && tcp.flags.push==1 && tcp.flags.urg==1
-💡 Pourquoi ce nom bizarre ?
-
-Active 3 flags en même temps : FIN, PSH, URG
-Dans Wireshark, ça "illumine" le paquet comme un sapin de Noël
-Configuration anormale et illogique en usage normal
-
-🎯 Technique :
-
-Même logique que FIN scan
-Encore plus furtif (certains IDS ne le détectent pas)
-
-📊 Pattern Wireshark :
-No.   Flags                    Info
-1     [FIN, PSH, URG]         → Envoi du scan
-2     [RST]                   ← Port fermé
-3     [FIN, PSH, URG]         → Envoi du scan
-      (pas de réponse)        ← Port ouvert (silence)
-
-Étape 4 : Créer une timeline de l'attaque
-Menu : Statistics → IO Graph
-Configuration du graphique :
-
-Y-Axis : COUNT
-Filter : tcp.flags.syn==1 && ip.src==192.168.1.50
-Interval : 1 second
-
-📊 Graphique résultant :
-Paquets/sec
-    |
-600 |     ████████
-    |    █████████████
-400 |   ████████████████
-    |  ███████████████████
-200 | ████████████████████
-    |█████████████████████
-  0 |________________________
-     14:23:00    14:23:30    14:24:00
-💡 Interprétation :
-
-Pic soudain : L'attaque commence
-Plateau élevé : Scan en cours (centaines de paquets/seconde)
-Chute brusque : Fin du scan
-Durée : ~45 secondes (scan rapide, outil automatisé type Nmap)
 # Identifier le type de scan
 Différents scans = différentes techniques = différents niveaux de sophistication
  - Scan vertical : Même source, même destination, ports différents
@@ -258,3 +160,5 @@ On voit à la fois les SYNs émis par 192.168.1.50 et les SYN+ACK renvoyés par 
 ║ • timeline_io_graph.png (graphique de l'attaque)             ║
 ║ • open_ports_list.txt (liste des ports découverts)           ║
 ╚══════════════════════════════════════════════════════════════╝
+
+
