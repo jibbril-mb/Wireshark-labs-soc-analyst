@@ -159,34 +159,47 @@ Pic soudain : L'attaque commence
 Plateau élevé : Scan en cours (centaines de paquets/seconde)
 Chute brusque : Fin du scan
 Durée : ~45 secondes (scan rapide, outil automatisé type Nmap)
+# Identifier le type de scan
+Différents scans = différentes techniques = différents niveaux de sophistication
+ - Scan vertical : Même source, même destination, ports différents
 
-🚨 Comparaison avec trafic normal :
+	# Comparaison avec trafic normal :
 
 Navigation web normale : 5-50 paquets/seconde
 Scan de ports : 200-1000+ paquets/seconde
 
+=================================================================
+***Comment interpréter les résultats sur une PCAP de scan ?**
 
-Étape 5 : Identifier les ports ouverts découverts
-Filtre : ip.src==192.168.1.100 && tcp.flags.syn==1 && tcp.flags.ack==1
-💡 Ce filtre montre quoi ?
-
-ip.src==192.168.1.100 : Réponses de la CIBLE
-tcp.flags.syn==1 && tcp.flags.ack==1 : Flag SYN-ACK = "Oui, ce port est ouvert"
-
-📊 Résultat :
-No.   Source         Destination    Info
-1456  192.168.1.100  192.168.1.50   22 → 54322 [SYN, ACK]  ← SSH ouvert
-1789  192.168.1.100  192.168.1.50   80 → 54380 [SYN, ACK]  ← HTTP ouvert
-2034  192.168.1.100  192.168.1.50   443 → 54443 [SYN, ACK] ← HTTPS ouvert
-2567  192.168.1.100  192.168.1.50   3306 → 54521 [SYN, ACK] ← MySQL ouvert ⚠️
-🚨 ALERTE CRITIQUE :
-
-Port 3306 (MySQL) ouvert sur un serveur web
-Ne devrait PAS être accessible depuis le réseau
-Risque d'exploitation de base de données
+# Une seule adresse IP source envoie des SYNs vers plusieurs ports d’une même cible => Scan vertical (ports d’une seule machine) :> nmap -sS 192.168.1.100
+Même source, même destination, ports différents
 
 
-📋 Rapport d'incident à produire
+**Comportement :**
+ - Envoie un SYN vers chaque port testé (SYN=1, ACK=0)
+ - Si port ouvert → reçoit SYN+ACK (SYN=1, ACK=1)
+ - N’envoie PAS le dernier ACK → connexion jamais établie
+
+Avec  **tcp.flags.syn == 1** sur la PCAP :
+On voit à la fois les SYNs émis par 192.168.1.50 et les SYN+ACK renvoyés par 192.168.1.100
+
+# Une seule adresse IP source envoie des SYNs vers plusieurs IPs Dst (pas seulement .100) sur un même port (ex: 445) => Scan horizontal (recherche de machines vulnérables) :> nmap -sS -p 445 192.168.1.0/24
+
+================================================================
+============== **Identifier les ports ouverts** ==============
+
+***Filtre : ip.src==192.168.1.100 && tcp.flags.syn==1 && tcp.flags.ack==1**
+
+# Ce filtre montre quoi ?
+
+- ip.src==192.168.1.100 : Réponses de la CIBLE
+- tcp.flags.syn==1 && tcp.flags.ack==1 : Flag SYN-ACK = "Oui, ce port est ouvert"
+
+***🚨 ALERTE CRITIQUE :**
+	- Port 3306 (MySQL) ouvert sur un serveur web
+	- Ne devrait PAS être accessible depuis le réseau
+	- Risque d'exploitation de base de données
+
 ╔══════════════════════════════════════════════════════════════╗
 ║             RAPPORT D'INCIDENT - SCAN DE PORTS               ║
 ╠══════════════════════════════════════════════════════════════╣
